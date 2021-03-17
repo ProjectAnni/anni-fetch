@@ -1,5 +1,8 @@
 # anni-fetch
 
+[![crates.io](https://img.shields.io/crates/v/anni-fetch.svg)](https://crates.io/crates/anni-fetch)
+[![API](https://docs.rs/anni-fetch/badge.svg)](https://docs.rs/anni-fetch)
+
 A library focuses on what git fetch does.
 
 ## Example
