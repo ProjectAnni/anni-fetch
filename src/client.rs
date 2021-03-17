@@ -85,7 +85,7 @@ impl Client {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Message {
     Normal(Vec<u8>),
     Flush,
@@ -148,77 +148,93 @@ impl Iterator for PktIter {
     }
 }
 
-#[test]
-fn test_handshake() {
-    for msg in Client::new("https://github.com/project-anni/repo.git").handshake().unwrap() {
-        println!("{:?}", msg);
-    }
-}
+#[cfg(test)]
+mod tests {
+    use crate::Client;
+    use crate::io::read_pktline;
+    use crate::client::Message::*;
 
-#[test]
-fn test_ls_refs() {
-    let mut c = Client::new("https://github.com/project-anni/repo.git")
-        .command("ls-refs", None, &["ref-prefix HEAD"]).unwrap();
-    loop {
-        let (data, len) = io::read_pktline(&mut c).unwrap();
-        if len == 0 && data.len() == 0 {
-            break;
-        }
-        println!("{:?}", String::from_utf8_lossy(&data));
+    #[test]
+    fn test_handshake() {
+        let v: Vec<_> = Client::new("https://github.com/project-anni/repo.git").handshake().unwrap().collect();
+        assert_eq!(v, vec![
+            Normal(b"# service=git-upload-pack\n".to_vec()),
+            Flush,
+            Normal(b"version 2\n".to_vec()),
+            Normal(b"agent=git/github-ga3f34e80fa9a\n".to_vec()),
+            Normal(b"ls-refs\n".to_vec()),
+            Normal(b"fetch=shallow filter\n".to_vec()),
+            Normal(b"server-option\n".to_vec()),
+            Normal(b"object-format=sha1\n".to_vec()),
+            Flush,
+        ]);
     }
-}
 
-#[test]
-fn test_fetch() {
-    let client = Client::new("https://github.com/project-anni/repo.git");
-    let mut c = client.command("fetch", None, &[
-        "thin-pack",
-        "ofs-delta",
-        "deepen 1",
-        &client.want_ref("HEAD").expect("failed to get sha1 of HEAD"),
-        "done"
-    ]).unwrap();
-    let mut is_data = false;
-    loop {
-        let (data, len) = io::read_pktline(&mut c).unwrap();
-        if len == 0 && data.len() == 0 {
-            break;
-        } else if len > 0 && is_data {
-            match data[0] {
-                1 => {
-                    // pack data
-                    println!("pack data");
-                }
-                2 => {
-                    // progress message
-                    println!("{}", String::from_utf8_lossy(&data[1..]).trim());
-                }
-                3 => {
-                    // fatal error
-                    eprintln!("{}", String::from_utf8_lossy(&data[1..]).trim());
-                }
-                _ => unreachable!(),
+    #[test]
+    fn test_ls_refs() {
+        let mut c = Client::new("https://github.com/project-anni/repo.git")
+            .command("ls-refs", None, &["ref-prefix HEAD"]).unwrap();
+        loop {
+            let (data, len) = read_pktline(&mut c).unwrap();
+            if len == 0 && data.len() == 0 {
+                break;
             }
-            continue;
-        } else if data == b"packfile\n" {
-            is_data = true;
-            continue;
+            println!("{:?}", String::from_utf8_lossy(&data));
         }
-        println!("{}", String::from_utf8_lossy(&data).trim());
     }
-}
 
-#[test]
-fn test_fetch_iter() {
-    let client = Client::new("https://github.com/project-anni/repo.git");
-    let iter = client.request("fetch", None, &[
-        "thin-pack",
-        "ofs-delta",
-        "deepen 1",
-        &client.want_ref("HEAD").expect("failed to get sha1 of HEAD"),
-        "done"
-    ]).unwrap();
-    for msg in iter {
-        println!("{:?}", msg);
+    #[test]
+    fn test_fetch() {
+        let client = Client::new("https://github.com/project-anni/repo.git");
+        let mut c = client.command("fetch", None, &[
+            "thin-pack",
+            "ofs-delta",
+            "deepen 1",
+            &client.want_ref("HEAD").expect("failed to get sha1 of HEAD"),
+            "done"
+        ]).unwrap();
+        let mut is_data = false;
+        loop {
+            let (data, len) = read_pktline(&mut c).unwrap();
+            if len == 0 && data.len() == 0 {
+                break;
+            } else if len > 0 && is_data {
+                match data[0] {
+                    1 => {
+                        // pack data
+                        println!("pack data");
+                    }
+                    2 => {
+                        // progress message
+                        println!("{}", String::from_utf8_lossy(&data[1..]).trim());
+                    }
+                    3 => {
+                        // fatal error
+                        eprintln!("{}", String::from_utf8_lossy(&data[1..]).trim());
+                    }
+                    _ => unreachable!(),
+                }
+                continue;
+            } else if data == b"packfile\n" {
+                is_data = true;
+                continue;
+            }
+            println!("{}", String::from_utf8_lossy(&data).trim());
+        }
+    }
+
+    #[test]
+    fn test_fetch_iter() {
+        let client = Client::new("https://github.com/project-anni/repo.git");
+        let iter = client.request("fetch", None, &[
+            "thin-pack",
+            "ofs-delta",
+            "deepen 1",
+            &client.want_ref("HEAD").expect("failed to get sha1 of HEAD"),
+            "done"
+        ]).unwrap();
+        for msg in iter {
+            println!("{:?}", msg);
+        }
     }
 }
