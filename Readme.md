@@ -23,7 +23,7 @@ fn main() {
     let mut pack = Vec::new();
     for msg in iter {
         match msg {
-            // only accpet PackData
+            // only handle PackData
             PackData(mut d) => pack.append(&mut d),
             _ => {}
         }
