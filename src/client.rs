@@ -85,15 +85,43 @@ impl Client {
     }
 }
 
+/// Message abstracts the type of information you may receive from a Git server.
 #[derive(Debug, PartialEq)]
 pub enum Message {
     Normal(Vec<u8>),
+    /// 0000 Flush Packet(flush-pkt)
+    ///
+    /// Indicates the end of a message
     Flush,
+    /// 0001 Delimeter Packet(delim-pkt)
+    ///
+    /// Separates sections of a message
     Delimeter,
+    /// 0002 Response End Packet(response-end-pkg)
+    ///
+    /// Indicates the end of a response for stateless connections
     ResponseEnd,
+    /// Received when data is `packfile\n`
+    ///
+    /// After this message, only `Pack.+` messages would be sent
+    ///
+    /// There is a byte at the beginning of all `Pack.+` messages except PackStart
+    /// The stream code can be one of:
+    /// 1 - pack data
+    /// 2 - progress messages
+    /// 3 - fatal error message just before stream aborts
     PackStart,
+    /// Received after `Message::PackStart` when stream code is 1
+    ///
+    /// Data of PACK file
     PackData(Vec<u8>),
+    /// Received after `Message::PackStart` when stream code is 2
+    ///
+    /// Progress messages of the transfer
     PackProgress(String),
+    /// Received after `Message::PackStart` when stream code is 3
+    ///
+    /// Fatal error message
     PackError(String),
 }
 
@@ -115,13 +143,14 @@ impl Iterator for PktIter {
     type Item = Message;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (data, len) = io::read_pktline(&mut self.inner).unwrap();
+        let (mut data, len) = io::read_pktline(&mut self.inner).unwrap();
         if len == 0 && data.len() == 0 {
             None
         } else if len > 0 && self.is_data {
             match data[0] {
                 1 => {
                     // pack data
+                    data.remove(0);
                     Some(Message::PackData(data))
                 }
                 2 => {
@@ -150,9 +179,10 @@ impl Iterator for PktIter {
 
 #[cfg(test)]
 mod tests {
-    use crate::Client;
+    use crate::{Client, Pack};
     use crate::io::read_pktline;
     use crate::client::Message::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_handshake() {
@@ -233,8 +263,14 @@ mod tests {
             &client.want_ref("HEAD").expect("failed to get sha1 of HEAD"),
             "done"
         ]).unwrap();
+        let mut pack = Vec::new();
         for msg in iter {
-            println!("{:?}", msg);
+            match msg {
+                PackData(mut d) => pack.append(&mut d),
+                _ => {}
+            }
         }
+        let mut cursor = Cursor::new(pack);
+        let _pack = Pack::from_reader(&mut cursor).expect("invalid pack file");
     }
 }

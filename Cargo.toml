@@ -1,7 +1,9 @@
 [package]
 name = "anni-fetch"
 version = "0.1.0"
-authors = ["Yesterday17 <t@yesterday17.cn>"]
+authors = ["Yesterday17 <mmf@mmf.moe>"]
+license = "Apache-2.0"
+description = "A library focuses on what git fetch does."
 edition = "2018"
 
 [dependencies]

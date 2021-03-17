@@ -47,6 +47,7 @@ fn read_len<R: Read>(reader: &mut R) -> std::io::Result<usize> {
     }
 }
 
+/// Read pkgline from a reader
 pub fn read_pktline<R: Read>(reader: &mut R) -> std::io::Result<(Vec<u8>, usize)> {
     let mut len = read_len(reader)?;
     let data = if len == 0x10000 {
