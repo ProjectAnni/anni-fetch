@@ -4,6 +4,7 @@ use miniz_oxide::{DataFormat, MZFlush};
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::stream::{InflateState, MinReset};
 use thiserror::Error;
+use sha1::Digest;
 
 #[derive(Debug, Error)]
 pub enum UnpackError {
@@ -11,17 +12,20 @@ pub enum UnpackError {
     InvalidObjectType,
     #[error("invalid TINFL status")]
     InvalidTINFLStatus(TINFLStatus),
+    #[error("invalid hash")]
+    InvalidHash,
     #[error(transparent)]
     DecodeError(#[from] DecodeError),
     #[error(transparent)]
     IOError(#[from] std::io::Error),
 }
 
-// TODO: return how many bytes consumed
-fn vint_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(u8, usize), DecodeError> {
+/// Read git variable integer and extract (object_type, length, bytes_used).
+fn vint_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(u8, usize, usize), DecodeError> {
     let mut len = 0usize;
     let mut object_type = 0u8;
     let mut i = 0;
+    let mut used = 0;
     loop {
         // read a byte
         let n = u8(reader)?;
@@ -40,40 +44,46 @@ fn vint_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(u8, usize),
         // shl to add number
         len |= (num as usize) << i;
         i += shift_inc;
+        used += 1;
 
         // the end of VInt when MSF is 0
         if n & 0b10000000 == 0 {
             break;
         }
     }
-    Ok((object_type, len))
+    Ok((object_type, len, used))
 }
 
-// TODO: return how many bytes consumed
-fn ofs_from_reader<R: Read>(reader: &mut R) -> std::result::Result<usize, DecodeError> {
+/// Read OFS_DELTA offset and extract (distance, bytes_used).
+fn ofs_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(usize, usize), DecodeError> {
     let mut n = u8(reader)?;
+    let mut used = 1;
     let mut distance = n as usize & 0b01111111;
     while n & 0b10000000 != 0 {
         n = u8(reader)?;
         distance += 1;
         distance = (distance << 7) + (n & 0b01111111) as usize;
+        used += 1;
     }
-    Ok(distance)
+    Ok((distance, used))
 }
 
-// TODO: offset
+#[derive(Debug)]
 pub struct Pack {
     pub version: u32,
     pub objects: Vec<Object>,
     pub sha1: Vec<u8>,
 }
 
+#[derive(Debug)]
 pub struct Object {
     pub object_type: ObjectType,
     pub data: Vec<u8>,
-    pub length_uncompressed: usize,
+    pub compressed_length: usize,
+    pub offset: usize,
 }
 
+#[derive(Debug)]
 pub enum ObjectType {
     Commit,
     Tree,
@@ -89,6 +99,7 @@ impl Pack {
         let version = u32_be(reader)?;
         let objects = u32_be(reader)?;
 
+        let mut offset = 12;
         let mut result = Vec::with_capacity(objects as usize);
 
         // Shareable data
@@ -98,21 +109,25 @@ impl Pack {
 
         for _ in 0..objects {
             use crate::pack::ObjectType::*;
-            let (object_type, len) = vint_from_reader(reader)?;
+            let (object_type, decompressed_length, mut object_size) = vint_from_reader(reader)?;
             let object_type = match object_type {
                 1 => Commit,
                 2 => Tree,
                 3 => Blob,
                 4 => Tag,
-                6 => OfsDelta(ofs_from_reader(reader)?),
+                6 => {
+                    let (d, u) = ofs_from_reader(reader)?;
+                    object_size += u;
+                    OfsDelta(d)
+                }
                 7 => RefDelta(Vec::new()), // TODO
                 _ => return Err(UnpackError::InvalidObjectType),
             };
 
-            let mut exact_size;
-            let mut offset = 0;
+            let compressed_length;
+            let mut data_copied = 0;
             loop {
-                offset += std::io::copy(&mut reader.take(len as u64), &mut input)?;
+                data_copied += std::io::copy(&mut reader.take(decompressed_length as u64), &mut input)?;
 
                 let r = miniz_oxide::inflate::stream::inflate(
                     &mut state,
@@ -120,9 +135,9 @@ impl Pack {
                     &mut output_data,
                     MZFlush::Partial,
                 );
-                exact_size = r.bytes_consumed;
                 match state.last_status() {
                     TINFLStatus::Done => {
+                        compressed_length = r.bytes_consumed;
                         state.reset_as(MinReset);
                         break;
                     }
@@ -133,7 +148,8 @@ impl Pack {
                     s => return Err(UnpackError::InvalidTINFLStatus(s)),
                 }
             }
-            reader.seek(SeekFrom::Current(-(offset as i64 - exact_size as i64)))?;
+            object_size += compressed_length;
+            reader.seek(SeekFrom::Current(-(data_copied as i64 - compressed_length as i64)))?;
 
             let data = match miniz_oxide::inflate::decompress_to_vec_zlib(&input) {
                 Ok(data) => data,
@@ -144,20 +160,30 @@ impl Pack {
             let object = Object {
                 object_type,
                 data,
-                length_uncompressed: len,
+                compressed_length,
+                offset,
             };
             result.push(object);
+            offset += object_size;
         }
 
         // final sha1
-        let sha1 = take(reader, 20)?;
-        // EOF
-        assert_eq!(std::io::copy(&mut reader.take(1), &mut input)?, 0);
+        let mut hasher = sha1::Sha1::new();
+        reader.seek(SeekFrom::Start(0))?;
+        std::io::copy(&mut reader.take(offset as u64), &mut hasher)?;
+        let hash_result = hasher.finalize();
+        let checksum = take(reader, 20)?;
+        if hash_result[..] != checksum[..] {
+            return Err(UnpackError::InvalidHash);
+        }
+
+        // bypass EOF check for now
+        // assert_eq!(std::io::copy(&mut reader.take(1), &mut input)?, 0);
 
         Ok(Self {
             version,
             objects: result,
-            sha1,
+            sha1: checksum,
         })
     }
 }
@@ -165,13 +191,13 @@ impl Pack {
 #[test]
 fn test_vint() {
     use std::io::Cursor;
-    assert_eq!(vint_from_reader(&mut Cursor::new(&[0b00101111])).unwrap(), (0b010, 0b1111));
+    assert_eq!(vint_from_reader(&mut Cursor::new(&[0b00101111])).unwrap(), (0b010, 0b1111, 1));
     assert_eq!(vint_from_reader(&mut Cursor::new(&[0b10010101, 0b00001010])).unwrap(),
-               (0b001, 0b0101 + (0b1010 << 4))
+               (0b001, 0b0101 + (0b1010 << 4), 2)
     );
     assert_eq!(vint_from_reader(&mut Cursor::new(
         &[0b10101111, 0b10101100, 0b10010010, 0b01110101])).unwrap(),
-               (0b010, 0b1111 + (0b0101100 << 4) + (0b0010010 << 11) + (0b1110101 << 18)),
+               (0b010, 0b1111 + (0b0101100 << 4) + (0b0010010 << 11) + (0b1110101 << 18), 4),
     );
 }
 
@@ -197,11 +223,13 @@ fn test_unpack() {
         0x09, 0x37, 0x01, 0xf8, 0x4f, 0x10, 0xd0, 0x02, 0x25, 0x2e, 0x07, 0xc3,
         0xaf, 0xdb, 0x2d, 0xcc, 0x0a, 0xb8, 0x8d, 0x36, 0xe8, 0xab, 0x4a, 0x26,
     ];
-    Pack::from_reader(&mut std::io::Cursor::new(data)).expect("parse failed");
+    let pack = Pack::from_reader(&mut std::io::Cursor::new(data)).expect("parse failed");
+    println!("{:?}", pack);
 }
 
 #[test]
 fn test_pack_large() {
     let mut file = std::fs::File::open("/tmp/test").expect("open failed");
-    Pack::from_reader(&mut file).expect("parse_failed");
+    let pack = Pack::from_reader(&mut file).expect("parse failed");
+    println!("{:?}", pack);
 }
