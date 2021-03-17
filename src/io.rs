@@ -114,5 +114,5 @@ fn test_pktline_write() {
     let out = Vec::with_capacity(100);
     let mut cursor = std::io::Cursor::new(out);
     write_pktline(&mut cursor, "test").expect("should success");
-    assert_eq!(cursor.into_inner(), b"0005test\n")
+    assert_eq!(cursor.into_inner(), b"0009test\n")
 }

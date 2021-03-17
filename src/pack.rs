@@ -5,6 +5,7 @@ use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::stream::{InflateState, MinReset};
 use thiserror::Error;
 use sha1::Digest;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Error)]
 pub enum UnpackError {
@@ -22,34 +23,17 @@ pub enum UnpackError {
 
 /// Read git variable integer and extract (object_type, length, bytes_used).
 fn vint_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(u8, usize, usize), DecodeError> {
-    let mut len = 0usize;
-    let mut object_type = 0u8;
-    let mut i = 0;
-    let mut used = 0;
-    loop {
-        // read a byte
-        let n = u8(reader)?;
+    let mut n = u8(reader)?;
+    let object_type = (n >> 4) & 0b00000111;
+    let mut len = (n as usize) & 0b00001111;
 
-        // if object type is not set, it should be the first byte
-        let (num, shift_inc) = if object_type == 0 {
-            // set object type
-            object_type = (n & 0b01110000) >> 4;
-            // the num is the latter 4 bits
-            (n & 0b00001111, 4)
-        } else {
-            // not the first byte
-            // the num is the latter 7 bits
-            (n & 0b01111111, 7)
-        };
-        // shl to add number
-        len |= (num as usize) << i;
-        i += shift_inc;
+    let mut shift = 4;
+    let mut used = 1;
+    while n & 0b10000000 != 0 {
+        n = u8(reader)?;
+        len |= ((n as usize) & 0b01111111) << shift;
+        shift += 7;
         used += 1;
-
-        // the end of VInt when MSF is 0
-        if n & 0b10000000 == 0 {
-            break;
-        }
     }
     Ok((object_type, len, used))
 }
@@ -71,7 +55,7 @@ fn ofs_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(usize, usize
 #[derive(Debug)]
 pub struct Pack {
     pub version: u32,
-    pub objects: Vec<Object>,
+    pub objects: BTreeMap<usize, Object>,
     pub sha1: Vec<u8>,
 }
 
@@ -100,7 +84,7 @@ impl Pack {
         let objects = u32_be(reader)?;
 
         let mut offset = 12;
-        let mut result = Vec::with_capacity(objects as usize);
+        let mut result = BTreeMap::new();
 
         // Shareable data
         let mut state = InflateState::new(DataFormat::Zlib);
@@ -163,7 +147,7 @@ impl Pack {
                 compressed_length,
                 offset,
             };
-            result.push(object);
+            result.insert(offset, object);
             offset += object_size;
         }
 
@@ -223,13 +207,13 @@ fn test_unpack() {
         0x09, 0x37, 0x01, 0xf8, 0x4f, 0x10, 0xd0, 0x02, 0x25, 0x2e, 0x07, 0xc3,
         0xaf, 0xdb, 0x2d, 0xcc, 0x0a, 0xb8, 0x8d, 0x36, 0xe8, 0xab, 0x4a, 0x26,
     ];
-    let pack = Pack::from_reader(&mut std::io::Cursor::new(data)).expect("parse failed");
-    println!("{:?}", pack);
+    let _pack = Pack::from_reader(&mut std::io::Cursor::new(data)).expect("parse failed");
+    // println!("{:?}", pack);
 }
 
 #[test]
 fn test_pack_large() {
     let mut file = std::fs::File::open("/tmp/test").expect("open failed");
-    let pack = Pack::from_reader(&mut file).expect("parse failed");
-    println!("{:?}", pack);
+    let _pack = Pack::from_reader(&mut file).expect("parse failed");
+    // println!("{:?}", pack);
 }
