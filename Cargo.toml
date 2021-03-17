@@ -6,7 +6,6 @@ edition = "2018"
 
 [dependencies]
 ureq = "2"
-anni-utils = { path = "../anni/anni-utils" }
 miniz_oxide = "0.4.4"
 sha-1 = "0.9.4"
 thiserror = "1.0"

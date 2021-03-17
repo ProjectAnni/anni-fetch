@@ -1,11 +1,11 @@
 use std::io::{Read, Seek, SeekFrom};
-use anni_utils::decode::*;
 use miniz_oxide::{DataFormat, MZFlush};
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::stream::{InflateState, MinReset};
 use thiserror::Error;
 use sha1::Digest;
 use std::collections::BTreeMap;
+use crate::io::{token, take_sized, u32_be, u8};
 
 #[derive(Debug, Error)]
 pub enum UnpackError {
@@ -16,13 +16,11 @@ pub enum UnpackError {
     #[error("invalid hash")]
     InvalidHash,
     #[error(transparent)]
-    DecodeError(#[from] DecodeError),
-    #[error(transparent)]
     IOError(#[from] std::io::Error),
 }
 
 /// Read git variable integer and extract (object_type, length, bytes_used).
-fn vint_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(u8, usize, usize), DecodeError> {
+fn vint_from_reader<R: Read>(reader: &mut R) -> std::io::Result<(u8, usize, usize)> {
     let mut n = u8(reader)?;
     let object_type = (n >> 4) & 0b00000111;
     let mut len = (n as usize) & 0b00001111;
@@ -39,7 +37,7 @@ fn vint_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(u8, usize, 
 }
 
 /// Read OFS_DELTA offset and extract (distance, bytes_used).
-fn ofs_from_reader<R: Read>(reader: &mut R) -> std::result::Result<(usize, usize), DecodeError> {
+fn ofs_from_reader<R: Read>(reader: &mut R) -> std::io::Result<(usize, usize)> {
     let mut n = u8(reader)?;
     let mut used = 1;
     let mut distance = n as usize & 0b01111111;
@@ -156,8 +154,8 @@ impl Pack {
         reader.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut reader.take(offset as u64), &mut hasher)?;
         let hash_result = hasher.finalize();
-        let checksum = take(reader, 20)?;
-        if hash_result[..] != checksum[..] {
+        let (checksum, got) = take_sized(reader, 20)?;
+        if got != 20 || hash_result[..] != checksum[..] {
             return Err(UnpackError::InvalidHash);
         }
 

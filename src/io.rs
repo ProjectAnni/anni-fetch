@@ -1,7 +1,39 @@
 /// https://git-scm.com/docs/protocol-common
 
 use std::io::{Read, Write};
-use anni_utils::decode::take_sized;
+use std::convert::TryInto;
+
+pub fn take_sized<R: Read>(reader: &mut R, len: usize) -> std::io::Result<(Vec<u8>, u64)> {
+    let mut r = Vec::with_capacity(len);
+    let got = std::io::copy(&mut reader.take(len as u64), &mut r)?;
+    Ok((r, got))
+}
+
+pub(crate) fn token<R: Read>(reader: &mut R, token: &[u8]) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let (got, read) = take_sized(reader, token.len())?;
+    if read != token.len() as u64 {
+        Err(Error::new(ErrorKind::InvalidInput, "more data needed"))
+    } else if got[..] == token[..] {
+        Ok(())
+    } else {
+        Err(Error::new(ErrorKind::InvalidData, "token mismatch"))
+    }
+}
+
+#[inline]
+pub(crate) fn u8<R: Read>(reader: &mut R) -> std::io::Result<u8> {
+    let mut buf = [0; 1];
+    reader.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
+
+#[inline]
+pub(crate) fn u32_be<R: Read>(reader: &mut R) -> std::io::Result<u32> {
+    let mut buf = [0; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_be_bytes(buf[..].try_into().unwrap()))
+}
 
 fn read_len<R: Read>(reader: &mut R) -> std::io::Result<usize> {
     let (next, got) = take_sized(reader, 4)?;
