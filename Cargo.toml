@@ -1,9 +1,14 @@
 [package]
 name = "anni-fetch"
-version = "0.1.0"
+description = "A library focuses on what git fetch does."
 authors = ["Yesterday17 <mmf@mmf.moe>"]
 license = "Apache-2.0"
-description = "A library focuses on what git fetch does."
+
+readme = "README.md"
+repository = "https://github.com/project-anni/anni-fetch"
+keywords = ["git"]
+
+version = "0.1.1"
 edition = "2018"
 
 [dependencies]
