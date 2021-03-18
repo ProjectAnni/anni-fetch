@@ -32,7 +32,7 @@ impl Client {
         Self {
             url: url.to_owned(),
             client: ureq::AgentBuilder::new()
-                .user_agent("anni-fetch 0.1.1")
+                .user_agent("anni-fetch 0.2.0")
                 .build(),
         }
     }
@@ -89,12 +89,8 @@ impl Client {
             .send_bytes(&body)?;
         if response.status() != 200 {
             return Err(ClientError::InvalidServerStatus);
-        } else if let None = response.header("Content-Type") {
-            return Err(ClientError::InvalidContentType("application/x-git-upload-pack-result", "Nothing".to_owned()));
-        } else if let Some(v) = response.header("Content-Type") {
-            if v != "application/x-git-upload-pack-result" {
-                return Err(ClientError::InvalidContentType("application/x-git-upload-pack-result", v.to_owned()));
-            }
+        } else if response.content_type() != "application/x-git-upload-pack-result" {
+            return Err(ClientError::InvalidContentType("application/x-git-upload-pack-result", response.content_type().to_owned()));
         }
         let reader = response.into_reader();
         Ok(PktIter::new(reader))

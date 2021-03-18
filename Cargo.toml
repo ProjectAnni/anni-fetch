@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/project-anni/anni-fetch"
 keywords = ["git"]
 
-version = "0.1.1"
+version = "0.2.0"
 edition = "2018"
 
 [dependencies]

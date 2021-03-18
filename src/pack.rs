@@ -113,7 +113,6 @@ impl Pack {
             loop {
                 let bytes_available = reader.read(&mut input_buf)?;
 
-
                 let (consumed, backseek, _) = Pack::extract_from(&mut state, bytes_available, &input_buf, &mut output_buf);
                 compressed_length += consumed;
                 data.append(&mut output_buf);
@@ -122,19 +121,13 @@ impl Pack {
                 input_buf.resize(2048, 0);
                 output_buf.resize(4096, 0);
                 match state.last_status() {
-                    TINFLStatus::Done => {
-                        while data.len() < decompressed_length {
-                            Pack::extract_from(&mut state, 0, &[], &mut output_buf);
-                            data.append(&mut output_buf);
-                            output_buf.resize(4096, 0);
-                        }
-                        assert_eq!(data.len(), decompressed_length);
-                        state.reset_as(MinReset);
-                        break;
-                    }
+                    // Need more input
+                    // Next turn, provide more input
                     TINFLStatus::NeedsMoreInput => {
                         continue;
                     }
+                    // Need more output
+                    // Output buffer of state is full, loop to pump them out
                     TINFLStatus::HasMoreOutput => {
                         loop {
                             let (_, _, produced) = Pack::extract_from(&mut state, 0, &[], &mut output_buf);
@@ -145,6 +138,19 @@ impl Pack {
                             }
                         }
                         continue;
+                    }
+                    // Done
+                    // Decode finished, but data may still in buffer of `state`
+                    // Need to pump them out first
+                    TINFLStatus::Done => {
+                        while data.len() < decompressed_length {
+                            Pack::extract_from(&mut state, 0, &[], &mut output_buf);
+                            data.append(&mut output_buf);
+                            output_buf.resize(4096, 0);
+                        }
+                        assert_eq!(data.len(), decompressed_length, "data length larget than expected decompressed length");
+                        state.reset_as(MinReset);
+                        break;
                     }
                     s => return Err(UnpackError::InvalidTINFLStatus(s)),
                 }
