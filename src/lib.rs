@@ -42,6 +42,7 @@
 pub mod io;
 pub mod pack;
 pub mod client;
+mod utils;
 
 pub use client::Client;
 pub use pack::Pack;

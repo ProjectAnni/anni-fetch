@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use miniz_oxide::{DataFormat, MZFlush};
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::stream::{InflateState, MinReset};
@@ -7,6 +7,7 @@ use sha1::Digest;
 use std::collections::HashMap;
 use crate::io::{token, u32_be, u8};
 use std::convert::TryInto;
+use crate::utils::git_sha1;
 
 const INPUT_BUFFER_SIZE: usize = 8 * 1024;
 const OUTPUT_BUFFER_SIZE: usize = 16 * 1024;
@@ -173,11 +174,14 @@ impl Pack {
             }
             object_size += compressed_length;
 
-            let mut hasher = sha1::Sha1::new();
-            hasher.write(&data)?;
-            let hash = hasher.finalize();
-            assert_eq!(hash.len(), 20);
-            let hash = hash[0..20].try_into().unwrap();
+            let hash = git_sha1(match object_type {
+                Commit => "commit",
+                Tree => "tree",
+                Blob => "blob",
+                Tag => "tag",
+                OfsDelta(_) => "o", // TODO
+                RefDelta(_) => "r" // TODO
+            }, &data);
 
             let object = Object {
                 object_type,
