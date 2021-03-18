@@ -1,6 +1,6 @@
 //! anni-fetch
 //!
-//! `anni-fetch` is interact with git server and fetch pack files from it.
+//! `anni-fetch` is written to interact with git server and fetch pack files from it.
 //! It implemented git v2 protocol and PACK file uncompression, which is used in git fetch procedure.
 //!
 //! # Example

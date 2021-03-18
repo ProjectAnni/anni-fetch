@@ -104,7 +104,12 @@ impl Pack {
                     object_size += u;
                     OfsDelta(d)
                 }
-                7 => RefDelta(Vec::new()), // TODO
+                7 => {
+                    let mut vec = vec![0u8; 20];
+                    reader.read_exact(&mut vec)?;
+                    object_size += 20;
+                    RefDelta(vec)
+                }
                 _ => return Err(UnpackError::InvalidObjectType),
             };
 
@@ -207,8 +212,9 @@ impl Pack {
 #[cfg(test)]
 mod tests {
     use crate::pack::{vint_from_reader, Object, ObjectType};
-    use crate::Pack;
+    use crate::{Pack, Client};
     use std::io::Cursor;
+    use crate::client::{RequestBuilder, Message};
 
     #[test]
     fn test_vint() {
@@ -273,5 +279,28 @@ Initial commit
         });
 
         assert_eq!(_pack.sha1, vec![79, 16, 208, 2, 37, 46, 7, 195, 175, 219, 45, 204, 10, 184, 141, 54, 232, 171, 74, 38]);
+    }
+
+    #[test]
+    fn test_ref_delta() {
+        let cli = Client::new("https://github.com/project-anni/repo.git");
+        let iter = cli.request(
+            RequestBuilder::new(true)
+                .command("fetch")
+                .argument("thin-pack")
+                .argument("ofs-delta")
+                .argument("deepen 1")
+                .want(&cli.ls_ref("HEAD").unwrap())
+                .have("da32dc7b28d73b67dcbb894daf862538615d7765")
+                .build()
+        ).unwrap();
+        let mut p = Vec::new();
+        for msg in iter {
+            match msg {
+                Message::PackData(mut data) => p.append(&mut data),
+                _ => {}
+            }
+        }
+        Pack::from_reader(&mut Cursor::new(p)).unwrap();
     }
 }
