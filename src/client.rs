@@ -4,10 +4,16 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ClientError {
+    // Common request errors
     #[error("invalid server status")]
     InvalidServerStatus,
     #[error("invalid response content type, expected {0}, got {1}")]
     InvalidContentType(&'static str, String),
+
+    // ls-ref error
+    #[error("invalid ref hash")]
+    InvalidRefHash,
+
     #[error(transparent)]
     RequestError(#[from] ureq::Error),
     #[error(transparent)]
@@ -26,7 +32,7 @@ impl Client {
         Self {
             url: url.to_owned(),
             client: ureq::AgentBuilder::new()
-                .user_agent("anni-fetch 0.1.0")
+                .user_agent("anni-fetch 0.1.1")
                 .build(),
         }
     }
@@ -95,18 +101,24 @@ impl Client {
     }
 
     pub fn ls_ref(&self, prefix: &str) -> Result<String, ClientError> {
-        let mut result = self.command(
-            "ls-refs",
-            None,
-            &[
-                "peel",
-                "symrefs",
-                &format!("ref-prefix {}", prefix),
-            ],
+        let iter = self.request(
+            RequestBuilder::new(true)
+                .command("ls-refs")
+                .argument("peel")
+                .argument("symrefs")
+                .argument(&format!("ref-prefix {}", prefix))
+                .build()
         )?;
-        let (mut result, _) = io::read_pktline(&mut result)?;
-        result.truncate(40);
-        Ok(String::from_utf8(result)?)
+        for msg in iter {
+            match msg {
+                Message::Normal(mut n) => {
+                    n.truncate(40);
+                    return Ok(String::from_utf8(n)?);
+                }
+                _ => {}
+            }
+        }
+        Err(ClientError::InvalidRefHash)
     }
 
     /// Use [RequestBuilder::want] with [Client::ls_ref] instead
@@ -116,6 +128,7 @@ impl Client {
     }
 }
 
+/// Builder for pktline-based git request body
 pub struct RequestBuilder {
     inner: Cursor<Vec<u8>>,
     delimeter_written: bool,
@@ -123,22 +136,28 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
+    /// Create a new RequestBuilder
+    ///
+    /// If auto_packet is enabled, DelimeterPacket would be inserted when first you call [argument],
+    /// and FlushPacket would be inserted at [build] time.
     pub fn new(auto_packet: bool) -> Self {
         let mut inner = Default::default();
         io::write_pktline(&mut inner, "object-format=sha1").unwrap();
         io::write_pktline(&mut inner, "agent=git/2.28.0").unwrap();
         Self {
             inner,
-            delimeter_written: auto_packet,
-            flush_written: auto_packet,
+            delimeter_written: !auto_packet,
+            flush_written: !auto_packet,
         }
     }
 
+    /// Write `command={command}` to body
     pub fn command(mut self, command: &str) -> Self {
         io::write_pktline(&mut self.inner, &format!("command={}", command)).unwrap();
         self
     }
 
+    /// Write `{name}={value_1} {value_2} {value_3}` to body
     pub fn capability(mut self, name: &str, value: &[&str]) -> Self {
         if value.len() != 0 {
             io::write_pktline(&mut self.inner, &format!("{}={}", name, value.join(" "))).unwrap();
@@ -148,6 +167,7 @@ impl RequestBuilder {
         self
     }
 
+    /// Write `{arg}` to body
     pub fn argument(mut self, arg: &str) -> Self {
         if !self.delimeter_written {
             self = self.packet(Message::Delimeter);
@@ -158,24 +178,27 @@ impl RequestBuilder {
         self
     }
 
+    /// Write `Message::Flush` or `Message::Delimeter` to body
     pub fn packet(mut self, packet: Message) -> Self {
         match packet {
             Message::Flush => io::write_packet(&mut self.inner, 0).unwrap(),
             Message::Delimeter => io::write_packet(&mut self.inner, 1).unwrap(),
-            Message::ResponseEnd => io::write_packet(&mut self.inner, 2).unwrap(),
-            _ => panic!("invalid packet type")
+            _ => panic!("invalid request packet type")
         }
         self
     }
 
-    pub fn want(mut self, hash: &str) -> Self {
+    /// Write `want {hash}` to body
+    pub fn want(self, hash: &str) -> Self {
         self.argument(&format!("want {}", hash))
     }
 
-    pub fn have(mut self, hash: &str) -> Self {
+    /// Write `have {hash}` to body
+    pub fn have(self, hash: &str) -> Self {
         self.argument(&format!("have {}", hash))
     }
 
+    /// Build RequestBuilder into Vec<u8>
     pub fn build(mut self) -> Vec<u8> {
         if !self.flush_written {
             self = self.packet(Message::Flush);
@@ -280,7 +303,6 @@ impl Iterator for PktIter {
 #[cfg(test)]
 mod tests {
     use crate::{Client, Pack};
-    use crate::io::read_pktline;
     use crate::client::Message::*;
     use std::io::Cursor;
     use crate::client::RequestBuilder;
@@ -288,11 +310,18 @@ mod tests {
     #[test]
     fn test_handshake() {
         let v: Vec<_> = Client::new("https://github.com/project-anni/repo.git").handshake().unwrap().collect();
-        assert_eq!(v, vec![
+        let (l, r) = v.split_at(3);
+        let (agent, r) = r.split_at(1);
+        assert_eq!(l, vec![
             Normal(b"# service=git-upload-pack\n".to_vec()),
             Flush,
             Normal(b"version 2\n".to_vec()),
-            Normal(b"agent=git/github-ga3f34e80fa9a\n".to_vec()),
+        ]);
+        match &agent[0] {
+            Normal(n) => assert!(n.starts_with(b"agent=git/github-")),
+            _ => panic!("invalid agent message type"),
+        }
+        assert_eq!(r, vec![
             Normal(b"ls-refs\n".to_vec()),
             Normal(b"fetch=shallow filter\n".to_vec()),
             Normal(b"server-option\n".to_vec()),
@@ -307,46 +336,6 @@ mod tests {
             .ls_ref("refs/tags")
             .unwrap();
         assert_eq!(hash, "9192b5e5f2941fd76aa5a08043dc8aa6a31831a2");
-    }
-
-    #[test]
-    fn test_fetch() {
-        let client = Client::new("https://github.com/project-anni/repo.git");
-        let mut c = client.command("fetch", None, &[
-            "thin-pack",
-            "ofs-delta",
-            "deepen 1",
-            &client.want_ref("HEAD").expect("failed to get sha1 of HEAD"),
-            "done"
-        ]).unwrap();
-        let mut is_data = false;
-        loop {
-            let (data, len) = read_pktline(&mut c).unwrap();
-            if len == 0 && data.len() == 0 {
-                break;
-            } else if len > 0 && is_data {
-                match data[0] {
-                    1 => {
-                        // pack data
-                        println!("pack data");
-                    }
-                    2 => {
-                        // progress message
-                        println!("{}", String::from_utf8_lossy(&data[1..]).trim());
-                    }
-                    3 => {
-                        // fatal error
-                        eprintln!("{}", String::from_utf8_lossy(&data[1..]).trim());
-                    }
-                    _ => unreachable!(),
-                }
-                continue;
-            } else if data == b"packfile\n" {
-                is_data = true;
-                continue;
-            }
-            println!("{}", String::from_utf8_lossy(&data).trim());
-        }
     }
 
     #[test]
