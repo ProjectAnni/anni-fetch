@@ -1,11 +1,12 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use miniz_oxide::{DataFormat, MZFlush};
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::stream::{InflateState, MinReset};
 use thiserror::Error;
 use sha1::Digest;
-use std::collections::BTreeMap;
-use crate::io::{token, take_sized, u32_be, u8};
+use std::collections::HashMap;
+use crate::io::{token, u32_be, u8};
+use std::convert::TryInto;
 
 const INPUT_BUFFER_SIZE: usize = 8 * 1024;
 const OUTPUT_BUFFER_SIZE: usize = 16 * 1024;
@@ -56,8 +57,9 @@ fn ofs_from_reader<R: Read>(reader: &mut R) -> std::io::Result<(usize, usize)> {
 #[derive(Debug)]
 pub struct Pack {
     pub version: u32,
-    pub objects: BTreeMap<usize, Object>,
-    pub sha1: Vec<u8>,
+    pub objects: HashMap<[u8; 20], Object>,
+    offsets: HashMap<usize, [u8; 20]>,
+    pub sha1: [u8; 20],
 }
 
 #[derive(Debug, PartialEq)]
@@ -75,17 +77,26 @@ pub enum ObjectType {
     Blob,
     Tag,
     OfsDelta(usize),
-    RefDelta(Vec<u8>),
+    RefDelta([u8; 20]),
 }
 
 impl Pack {
+    pub fn offset(&self, offset: usize) -> Option<&Object> {
+        if let Some(hash) = self.offsets.get(&offset) {
+            self.objects.get(hash)
+        } else {
+            None
+        }
+    }
+
     pub fn from_reader<R: Read + Seek>(reader: &mut R) -> std::result::Result<Self, UnpackError> {
         token(reader, b"PACK")?;
         let version = u32_be(reader)?;
         let objects = u32_be(reader)?;
 
         let mut offset = 12;
-        let mut result = BTreeMap::new();
+        let mut result = HashMap::new();
+        let mut offsets = HashMap::new();
 
         let mut state = InflateState::new_boxed(DataFormat::Zlib);
         let mut input_buf = vec![0u8; INPUT_BUFFER_SIZE];
@@ -105,10 +116,10 @@ impl Pack {
                     OfsDelta(d)
                 }
                 7 => {
-                    let mut vec = vec![0u8; 20];
-                    reader.read_exact(&mut vec)?;
+                    let mut data = [0u8; 20];
+                    reader.read_exact(&mut data)?;
                     object_size += 20;
-                    RefDelta(vec)
+                    RefDelta(data)
                 }
                 _ => return Err(UnpackError::InvalidObjectType),
             };
@@ -162,13 +173,20 @@ impl Pack {
             }
             object_size += compressed_length;
 
+            let mut hasher = sha1::Sha1::new();
+            hasher.write(&data)?;
+            let hash = hasher.finalize();
+            assert_eq!(hash.len(), 20);
+            let hash = hash[0..20].try_into().unwrap();
+
             let object = Object {
                 object_type,
                 data,
                 compressed_length,
                 offset,
             };
-            result.insert(offset, object);
+            offsets.insert(offset, hash);
+            result.insert(hash, object);
             offset += object_size;
         }
 
@@ -177,8 +195,10 @@ impl Pack {
         reader.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut reader.take(offset as u64), &mut hasher)?;
         let hash_result = hasher.finalize();
-        let (checksum, got) = take_sized(reader, 20)?;
-        if got != 20 || hash_result[..] != checksum[..] {
+        let hash_result: [u8; 20] = hash_result.try_into().unwrap();
+        let mut checksum = [0u8; 20];
+        reader.read_exact(&mut checksum)?;
+        if hash_result != checksum {
             return Err(UnpackError::InvalidHash);
         }
 
@@ -188,6 +208,7 @@ impl Pack {
         Ok(Self {
             version,
             objects: result,
+            offsets,
             sha1: checksum,
         })
     }
@@ -252,7 +273,7 @@ mod tests {
         ];
         let _pack = Pack::from_reader(&mut std::io::Cursor::new(data)).expect("parse failed");
         assert_eq!(_pack.version, 2);
-        assert_eq!(_pack.objects[&12], Object {
+        assert_eq!(_pack.offset(12).unwrap(), &Object {
             object_type: ObjectType::Commit,
             data: br"tree 90d83dbf6a598d66405eb0b4baad14990d0f2755
 author yesterday17 <mmf@mmf.moe> 1615876429 +0800
@@ -264,12 +285,12 @@ Initial commit
             offset: 12,
         });
 
-        assert_eq!(_pack.objects[&131].object_type, ObjectType::Tree);
-        assert!(_pack.objects[&131].data.starts_with(b"100644 README.md"));
-        assert_eq!(_pack.objects[&131].compressed_length, 46);
-        assert_eq!(_pack.objects[&131].offset, 131);
+        assert_eq!(_pack.offset(131).unwrap().object_type, ObjectType::Tree);
+        assert!(_pack.offset(131).unwrap().data.starts_with(b"100644 README.md"));
+        assert_eq!(_pack.offset(131).unwrap().compressed_length, 46);
+        assert_eq!(_pack.offset(131).unwrap().offset, 131);
 
-        assert_eq!(_pack.objects[&179], Object {
+        assert_eq!(_pack.offset(179).unwrap(), &Object {
             object_type: ObjectType::Blob,
             data: br"# Test
 
@@ -278,7 +299,7 @@ Initial commit
             offset: 179,
         });
 
-        assert_eq!(_pack.sha1, vec![79, 16, 208, 2, 37, 46, 7, 195, 175, 219, 45, 204, 10, 184, 141, 54, 232, 171, 74, 38]);
+        assert_eq!(_pack.sha1, [79, 16, 208, 2, 37, 46, 7, 195, 175, 219, 45, 204, 10, 184, 141, 54, 232, 171, 74, 38]);
     }
 
     #[test]
