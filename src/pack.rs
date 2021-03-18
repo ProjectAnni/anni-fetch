@@ -7,6 +7,9 @@ use sha1::Digest;
 use std::collections::BTreeMap;
 use crate::io::{token, take_sized, u32_be, u8};
 
+const INPUT_BUFFER_SIZE: usize = 8 * 1024;
+const OUTPUT_BUFFER_SIZE: usize = 16 * 1024;
+
 #[derive(Debug, Error)]
 pub enum UnpackError {
     #[error("invalid object type")]
@@ -84,10 +87,9 @@ impl Pack {
         let mut offset = 12;
         let mut result = BTreeMap::new();
 
-        // Shareable data
-        let mut state = InflateState::new(DataFormat::Zlib);
-        let mut output_data = Vec::new();
-        let mut input = Vec::with_capacity(2048);
+        let mut state = InflateState::new_boxed(DataFormat::Zlib);
+        let mut input_buf = vec![0u8; INPUT_BUFFER_SIZE];
+        let mut output_buf = vec![0u8; OUTPUT_BUFFER_SIZE];
 
         for _ in 0..objects {
             use crate::pack::ObjectType::*;
@@ -106,38 +108,48 @@ impl Pack {
                 _ => return Err(UnpackError::InvalidObjectType),
             };
 
-            let compressed_length;
-            let mut data_copied = 0;
+            let mut compressed_length = 0;
+            let mut data = Vec::with_capacity(decompressed_length);
             loop {
-                data_copied += std::io::copy(&mut reader.take(decompressed_length as u64), &mut input)?;
+                let bytes_available = reader.read(&mut input_buf)?;
 
-                let r = miniz_oxide::inflate::stream::inflate(
-                    &mut state,
-                    &input,
-                    &mut output_data,
-                    MZFlush::Partial,
-                );
+
+                let (consumed, backseek, _) = Pack::extract_from(&mut state, bytes_available, &input_buf, &mut output_buf);
+                compressed_length += consumed;
+                data.append(&mut output_buf);
+                reader.seek(SeekFrom::Current(backseek))?;
+
+                input_buf.resize(2048, 0);
+                output_buf.resize(4096, 0);
                 match state.last_status() {
                     TINFLStatus::Done => {
-                        compressed_length = r.bytes_consumed;
+                        while data.len() < decompressed_length {
+                            Pack::extract_from(&mut state, 0, &[], &mut output_buf);
+                            data.append(&mut output_buf);
+                            output_buf.resize(4096, 0);
+                        }
+                        assert_eq!(data.len(), decompressed_length);
                         state.reset_as(MinReset);
                         break;
                     }
                     TINFLStatus::NeedsMoreInput => {
-                        state.reset_as(MinReset);
+                        continue;
+                    }
+                    TINFLStatus::HasMoreOutput => {
+                        loop {
+                            let (_, _, produced) = Pack::extract_from(&mut state, 0, &[], &mut output_buf);
+                            data.append(&mut output_buf);
+                            output_buf.resize(4096, 0);
+                            if produced < OUTPUT_BUFFER_SIZE {
+                                break;
+                            }
+                        }
                         continue;
                     }
                     s => return Err(UnpackError::InvalidTINFLStatus(s)),
                 }
             }
             object_size += compressed_length;
-            reader.seek(SeekFrom::Current(-(data_copied as i64 - compressed_length as i64)))?;
-
-            let data = match miniz_oxide::inflate::decompress_to_vec_zlib(&input) {
-                Ok(data) => data,
-                Err(s) => return Err(UnpackError::InvalidTINFLStatus(s)),
-            };
-            input.clear();
 
             let object = Object {
                 object_type,
@@ -167,6 +179,22 @@ impl Pack {
             objects: result,
             sha1: checksum,
         })
+    }
+
+    fn extract_from(mut state: &mut Box<InflateState>, bytes_available: usize, input_buf: &[u8], mut output_buf: &mut Vec<u8>) -> (usize, i64, usize) {
+        let r = miniz_oxide::inflate::stream::inflate(
+            &mut state,
+            &input_buf[..bytes_available],
+            &mut output_buf,
+            MZFlush::Partial,
+        );
+        let consumed = r.bytes_consumed;
+        let backseek = (consumed as i64) - (bytes_available as i64);
+        let produced = r.bytes_written;
+        if produced != output_buf.len() {
+            output_buf.truncate(produced);
+        }
+        (consumed, backseek, produced)
     }
 }
 

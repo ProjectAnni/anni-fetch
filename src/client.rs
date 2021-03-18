@@ -271,6 +271,6 @@ mod tests {
             }
         }
         let mut cursor = Cursor::new(pack);
-        let _pack = Pack::from_reader(&mut cursor).expect("invalid pack file");
+        Pack::from_reader(&mut cursor).expect("invalid pack file");
     }
 }
