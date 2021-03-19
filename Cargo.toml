@@ -11,6 +11,9 @@ keywords = ["git"]
 version = "0.2.0"
 edition = "2018"
 
+#[lib]
+#crate-type = ["cdylib"]
+
 [dependencies]
 ureq = "2"
 miniz_oxide = "0.4.4"

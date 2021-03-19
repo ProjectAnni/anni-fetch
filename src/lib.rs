@@ -3,6 +3,8 @@
 //! `anni-fetch` is written to interact with git server and fetch pack files from it.
 //! It implemented git v2 protocol and PACK file uncompression, which is used in git fetch procedure.
 //!
+//! Used some documents from [https://git-scm.com/docs/protocol-v2]
+//!
 //! # Example
 //!
 //! ```rust
@@ -38,6 +40,9 @@
 //! You can use `match` to filter the type of message you want.
 //! For example, you can just receive `Message::PackData` and
 //! write the content to a `pak` file.
+
+// TODO: no_std support
+// #![no_std]
 
 pub mod io;
 pub mod pack;

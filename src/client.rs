@@ -125,6 +125,21 @@ impl Client {
 }
 
 /// Builder for pktline-based git request body
+///
+/// After receiving the capability advertisement, a client can then issue a request
+/// to select the command it wants with any particular capabilities or arguments.
+///
+/// There is then an optional section where the client can provide any command specific
+/// parameters or queries. Only a single command can be requested at a time.
+///
+/// The server will then check to ensure that the client’s request is comprised
+/// of a valid command as well as valid capabilities which were advertised.
+///
+/// If the request is valid the server will then execute the command.
+/// A server MUST wait till it has received the client’s entire request before issuing a response.
+///
+/// The format of the response is determined by the command being executed, but in all cases
+/// a flush-pkt indicates the end of the response.
 pub struct RequestBuilder {
     inner: Cursor<Vec<u8>>,
     delimeter_written: bool,
@@ -148,15 +163,24 @@ impl RequestBuilder {
     }
 
     /// Write `command={command}` to body
+    ///
+    /// ``text
+    /// command = PKT-LINE("command=" key LF)
+    /// ```
     pub fn command(mut self, command: &str) -> Self {
         io::write_pktline(&mut self.inner, &format!("command={}", command)).unwrap();
         self
     }
 
-    /// Write `{name}={value_1} {value_2} {value_3}` to body
-    pub fn capability(mut self, name: &str, value: &[&str]) -> Self {
-        if value.len() != 0 {
-            io::write_pktline(&mut self.inner, &format!("{}={}", name, value.join(" "))).unwrap();
+    /// Write `{name}={value}` to body
+    ///
+    /// ```text
+    /// capability-list = *capability
+    /// capability = PKT-LINE(key[=value] LF)
+    /// ```
+    pub fn capability(mut self, name: &str, value: Option<&str>) -> Self {
+        if let Some(value) = value {
+            io::write_pktline(&mut self.inner, &format!("{}={}", name, value)).unwrap();
         } else {
             io::write_pktline(&mut self.inner, name).unwrap();
         }
@@ -164,6 +188,13 @@ impl RequestBuilder {
     }
 
     /// Write `{arg}` to body
+    ///
+    /// ```text
+    /// command-args = delim-pkt
+    ///  *command-specific-arg
+    /// ```
+    ///
+    /// command-specific-args are packet line framed arguments defined by each individual command.
     pub fn argument(mut self, arg: &str) -> Self {
         if !self.delimeter_written {
             self = self.packet(Message::Delimeter);
